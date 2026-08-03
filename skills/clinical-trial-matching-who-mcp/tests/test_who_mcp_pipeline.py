@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,26 @@ class WhoMcpPipelineTests(unittest.TestCase):
         self.assertNotIn(
             patient["cancer_type"],
             [query.get("term") for query in registry_group["queries"]],
+        )
+
+    def test_search_expansion_is_bounded_per_dimension(self):
+        patient = {
+            "patient_id": "PT-1",
+            "cancer_type": "solid tumor",
+            "mutations": [f"MARKER-{index}" for index in range(12)],
+            "search_terms": {
+                "named_agents": [f"AGENT-{index}" for index in range(12)],
+            },
+        }
+        with mock.patch.dict("os.environ", {"SEARCH_MAX_TERMS_PER_DIMENSION": "3"}):
+            plan = build_baseline_search_plan(patient)
+        self.assertTrue(all(
+            len(group["queries"]) <= 3 for group in plan["keyword_groups"]
+        ))
+        self.assertEqual(plan["generation_audit"]["max_terms_per_dimension"], 3)
+        self.assertEqual(
+            plan["generation_audit"]["query_count"],
+            sum(len(group["queries"]) for group in plan["keyword_groups"]),
         )
 
     def test_mcp_plan_compiler_joins_disease_and_concept_anchors(self):
@@ -277,6 +298,18 @@ class WhoMcpPipelineTests(unittest.TestCase):
             "database_as_of": "2026-07-09T00:45:35+00:00",
             "database_metadata": {"schema_version": "3"},
             "portal_delta": {"status": "not_executed"},
+            "decision_report": {
+                "decision_paths": [{
+                    "rank": 1, "trial_id": "NCT00000001",
+                    "trial_title": "Adagrasib", "rationale": "优先核实。",
+                }],
+                "goals_of_care": {},
+            },
+            "report_warnings": [{
+                "code": "DATA_SNAPSHOT_STALE",
+                "message_zh": "招募状态须重新核实。",
+                "message_en": "Recruitment status requires re-verification.",
+            }],
         }
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "report.html"
@@ -286,7 +319,38 @@ class WhoMcpPipelineTests(unittest.TestCase):
             self.assertIn("2026-07-09T00:45:35+00:00", html)
             self.assertIn("国内", html)
             self.assertIn("靶点治疗", html)
+            self.assertIn("招募状态须重新核实", html)
+            self.assertIn('href="#trial-NCT00000001"', html)
+            self.assertIn('id="trial-NCT00000001"', html)
             self.assertEqual(html.count('<details class="trial'), 1)
+
+    def test_html_displays_duplicate_id_once_and_labels_closed_recruitment(self):
+        trial = {
+            "id": "NCT-CLOSED", "phases": [], "overall_status": "COMPLETED",
+            "mechanism_category": {
+                "category": "targeted_therapy", "label_zh": "靶点治疗",
+                "label_en": "Targeted therapy",
+            },
+            "country_assessment": {"class": "overseas"},
+            "resolved_source_url": "https://clinicaltrials.gov/study/NCT-CLOSED",
+            "display_title": "Agent X · 靶点治疗 · 已关闭招募",
+            "gating": {"verdict": "exclude", "satisfied": [], "pending": [], "exclusion_reasons": []},
+            "risk_context": [], "efficacy_context": "",
+        }
+        payload = {
+            "language": "zh-CN", "patient": self.patient,
+            "trials": [trial, dict(trial)],
+            "counts": {"match": 0, "conditional": 0, "exclude": 1},
+            "geography_audit": {"overseas": 1},
+            "database_as_of": "2026-07-09T00:45:35+00:00",
+            "database_metadata": {}, "portal_delta": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.html"
+            render_html(payload, output)
+            html = output.read_text(encoding="utf-8")
+        self.assertEqual(html.count('<details class="trial'), 1)
+        self.assertIn("已关闭招募", html)
 
 if __name__ == "__main__":
     unittest.main()

@@ -90,7 +90,7 @@ Feasibility remains operational and patient-relative. Geographic and financial d
 
 Use only `scripts/render/html_renderer.py`. The report follows the patient-triage layout, groups trials by mechanism and provides All / In-country access / Country record unverified / Overseas filters. Mechanism counts must update with the active filter.
 
-China patients receive Chinese report framing; other patients receive English framing. Detailed analysis text should be emitted by the model in the same language as the report.
+Patients whose explicit current country is China receive a Simplified Chinese report; all other countries receive an English report. Formal finalize automatically post-translates patient-facing narratives through the provider-neutral `TRANSLATION_MODEL_*` API configuration (or inherited `MODEL_*`). Translation never changes retrieval or clinical decisions. Use `TRANSLATION_MODE=required` when a China report must fail rather than continue without a configured translation API.
 
 ## Commands
 
@@ -144,8 +144,8 @@ coverage, and finalize before a validated merged bundle.
 
 ## Quality gates
 
-- Reject incomplete eight-dimensional plans.
-- Reject global MCP truncation; retain per-query pagination/truncation audit.
+- Require all eight search dimensions when building a new plan.
+- Disclose MCP truncation and retain per-query pagination/truncation audit.
 - Reject formal reports without complete validated LLM subskill output.
 - Reject risk output whose cancer context differs from the patient.
 - Reject efficacy estimates without applicability reasoning and evidence source.
@@ -155,16 +155,18 @@ coverage, and finalize before a validated merged bundle.
 
 A positive analysis-limit or prefilter-limit is validation-only. Both default to zero. Formal staged runs require every recalled trial to receive either an auditable deterministic hard exclusion or a model gater verdict, and every `match` or `conditional` verdict to receive validated risk, efficacy and development-evidence output.
 
-When a gate fails, finalize emits a conspicuous `validation-report.html` audit
-summary without patient trial cards. It does not emit `report.html`.
-`formal_report_ready` is true only when all three gates pass:
+Finalize uses one blocking gate and local warnings. It emits only
+`validation-report.html` when validated analysis integrity is incomplete.
+`formal_report_ready` depends on gate 1; gates 2 and 3 are visible warnings:
 
 1. every recalled trial has a hard-rule or gater disposition, every non-excluded trial has complete deep analysis, and there are no budget omissions;
-2. neither global nor per-query MCP retrieval is truncated;
-3. data freshness is level A or B: level A has a current WHO portal delta and a
+2. retrieval truncation warns that the report covers analyzed recall only;
+3. freshness below level A/B warns that recruitment status and sites require
+   re-verification. Level A has a current WHO portal delta and a
    complete direct-registry audit; level B permits a database snapshot within
    `WHO_MCP_DATABASE_MAX_AGE_HOURS` and still requires the complete direct-registry
    audit. A portal delta never substitutes for recruitment-status verification.
-   Level C is validation-only.
 
-The jobs contract carries target_language. Patient-facing rationale, eligibility, risk and efficacy narratives must be written in that language.
+The clinical analysis language is not a gate. Chinese delivery is produced by
+translating the grounded English patient-facing report while preserving trial
+IDs, drug names, biomarkers, numbers, citations and URLs.

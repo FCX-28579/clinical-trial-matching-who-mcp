@@ -28,9 +28,16 @@ def _flatten(value:Any)->list[str]:
 def trial_text(trial:dict[str,Any],analysis:dict[str,Any]|None=None)->str:
  # Retrieval-branch labels are excluded: they describe recall, not the administered treatment.
  # Gating/eligibility narratives are excluded: a treatment mentioned only in an exclusion criterion must not determine the mechanism.
- # The efficacy subskill may contribute an explicit administered-mechanism summary.
+ # Only an explicit administered-mechanism list may supplement registry fields.
+ # Full efficacy/risk prose can mention comparator therapies and must not classify the trial.
+ risk=(analysis or {}).get("risk_annotation") if isinstance(analysis,dict) else None
+ mechanisms=(risk or {}).get("trial_mechanisms_identified") if isinstance(risk,dict) else None
  efficacy=(analysis or {}).get("efficacy_context") if isinstance(analysis,dict) else None
- values=[trial.get("title"),trial.get("scientific_title"),trial.get("interventions"),trial.get("intervention_summary"),efficacy or {}]
+ efficacy_summary=(efficacy or {}).get("summary") if isinstance(efficacy,dict) else ""
+ explicit_summary=(
+  efficacy_summary if "administered intervention" in str(efficacy_summary).casefold() else ""
+ )
+ values=[trial.get("title"),trial.get("scientific_title"),trial.get("interventions"),trial.get("intervention_summary"),mechanisms or [],explicit_summary]
  return re.sub(r"\s+"," "," ".join(_flatten(values))).casefold()
 
 def classify_mechanism(trial:dict[str,Any],analysis:dict[str,Any]|None=None,patient:dict[str,Any]|None=None)->dict[str,Any]:

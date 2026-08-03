@@ -183,6 +183,27 @@ def _direct_fields(
     return fields
 
 
+def _enforce_gating_consistency(gating: dict[str, Any]) -> bool:
+    """Resolve only structurally explicit hard-line conflicts.
+
+    A cohort-specific hard conflict may coexist with another eligible cohort, so
+    the adapter only excludes when the model supplied no cohort analysis at all.
+    """
+    if gating.get("verdict") == "exclude":
+        return False
+    r2 = gating.get("R2_detail")
+    if not isinstance(r2, dict) or str(r2.get("severity") or "").casefold() != "hard":
+        return False
+    if str(r2.get("cohort_analysis") or "").strip():
+        return False
+    gating["verdict"] = "exclude"
+    rules = list(gating.get("hard_rules_triggered") or [])
+    if "R2" not in rules:
+        rules.append("R2")
+    gating["hard_rules_triggered"] = rules
+    return True
+
+
 def _normalize_batch_payload(
     batch: dict[str, Any], payload: dict[str, Any]
 ) -> tuple[dict[str, Any], bool]:
@@ -210,6 +231,7 @@ def _normalize_batch_payload(
                 row["gating"] = direct
                 changed = True
             if isinstance(row.get("gating"), dict):
+                changed = _enforce_gating_consistency(row["gating"]) or changed
                 changed = changed or bool(direct)
                 row = {
                     key: value
@@ -241,6 +263,22 @@ def _normalize_batch_payload(
                     if compact_risks != risks:
                         risk["risks"] = compact_risks
                         changed = True
+                    for entry in compact_risks:
+                        if not isinstance(entry, dict) or entry.get("applies_because"):
+                            continue
+                        narrative = entry.get("narrative")
+                        if isinstance(narrative, list):
+                            explanation = next(
+                                (
+                                    str(item).strip()
+                                    for item in narrative
+                                    if str(item or "").strip()
+                                ),
+                                "",
+                            )
+                            if explanation:
+                                entry["applies_because"] = explanation
+                                changed = True
                 if patient_cancer and risk.get("patient_cancer_context") != patient_cancer:
                     risk["patient_cancer_context"] = patient_cancer
                     changed = True
@@ -345,7 +383,7 @@ def _coalesce_deep_rows(
 def _validate_decision_output(
     output: Path, allowed_ids: set[str] | None = None,
     analyzed_trials: list[dict[str, Any]] | None = None,
-    language: str = "en",
+    language: str = "en", patient: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = load_json(output)
     decision = payload.get("decision_report", payload) if isinstance(payload, dict) else None
@@ -373,11 +411,33 @@ def _validate_decision_output(
         normalized = {**path, "trial_id": trial_id, "rank": len(normalized_paths) + 1}
         changed = changed or normalized != path
         normalized_paths.append(normalized)
+        if len(normalized_paths) == 3:
+            changed = changed or len(decision["decision_paths"]) > 3
+            break
+    decision["decision_paths"] = normalized_paths
     if analyzed_trials is not None:
-        ground_decision_report(decision, analyzed_trials, language=language)
+        ground_decision_report(
+            decision, analyzed_trials, language=language, patient=patient or {}
+        )
+        changed = True
+    actual_path_count = len(decision["decision_paths"])
+    summary = decision.get("v2_summary")
+    reported_path_count = None
+    if isinstance(summary, dict):
+        reported_path_count = summary.get("decision_paths_emitted")
+    if (
+        isinstance(reported_path_count, int)
+        and reported_path_count > 0
+        and actual_path_count == 0
+    ):
+        raise ValueError(
+            f"{output.name}: decision output reported {reported_path_count} path(s) "
+            "but none referenced a valid non-excluded trial"
+        )
+    if isinstance(summary, dict) and reported_path_count != actual_path_count:
+        summary["decision_paths_emitted"] = actual_path_count
         changed = True
     if changed:
-        decision["decision_paths"] = normalized_paths
         write_json_atomic(output, payload)
     if not isinstance(decision.get("goals_of_care"), dict):
         raise ValueError(f"{output.name}: goals_of_care must be an object")
@@ -717,7 +777,7 @@ def execute_decision(
     }
     analyzed_trials = analysis.get("analyzed_trials") or []
     validate = lambda path: _validate_decision_output(
-        path, allowed_ids, analyzed_trials, report_language(patient)
+        path, allowed_ids, analyzed_trials, report_language(patient), patient
     )
     envelope = {
         "schema_version": "deterministic-model-job-v1",

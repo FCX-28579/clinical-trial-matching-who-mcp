@@ -111,3 +111,82 @@ class EvidenceGroundingTests(unittest.TestCase):
             "cannot establish superiority",
             grounded["vs_soc"]["comparison_limitation"],
         )
+
+    def test_top_paths_prioritize_fit_and_drop_current_drug_overlap(self):
+        patient = {
+            "current_therapy_status": "RMC-6236",
+            "current_therapy_ongoing": True,
+        }
+        def source(trial_id, verdict, feasibility, interventions, pending=None):
+            return {
+                "trial_id": trial_id, "title": trial_id,
+                "interventions": interventions, "overall_status": "RECRUITING",
+                "patient_country_site_count": 1,
+                "feasibility": {"composite": feasibility},
+                "gating": {
+                    "verdict": verdict, "blockers_satisfied": [],
+                    "blockers_failed": [], "blockers_pending": pending or [],
+                    "rationale": f"{trial_id} rationale",
+                },
+                "risk_summary": {"risks": []},
+                "efficacy_summary": {
+                    "match_type": "no_data", "evidence_source": None,
+                    "applies_because": "No direct evidence", "vs_soc": {"available": False},
+                },
+            }
+        sources = [
+            source("CURRENT", "match", 1.0, ["RMC-6236"]),
+            source("MATCH", "match", 0.6, ["Agent A"]),
+            source("CONDITIONAL", "conditional", 0.9, ["Agent B"], ["IHC"]),
+            source("MATCH2", "match", 0.5, ["Agent C"]),
+        ]
+        decision = {"decision_paths": [{"trial_id": "CURRENT"}]}
+        paths = ground_decision_report(
+            decision, sources, patient=patient
+        )["decision_paths"]
+        self.assertEqual([item["trial_id"] for item in paths], [
+            "MATCH", "MATCH2", "CONDITIONAL",
+        ])
+        self.assertEqual([item["rank"] for item in paths], [1, 2, 3])
+
+    def test_top_paths_rank_globally_instead_of_reserving_access_buckets(self):
+        def source(trial_id, verdict, access, score):
+            return {
+                "trial_id": trial_id, "title": trial_id,
+                "interventions": [trial_id], "overall_status": "RECRUITING",
+                "country_assessment": {"class": access},
+                "feasibility": {"composite": score},
+                "gating": {
+                    "verdict": verdict, "blockers_satisfied": [],
+                    "blockers_failed": [], "blockers_pending": [],
+                    "rationale": f"{trial_id} rationale",
+                },
+                "risk_summary": {"risks": []},
+                "efficacy_summary": {"vs_soc": {"available": False}},
+            }
+        paths = ground_decision_report({}, [
+            source("HOME", "match", "domestic_named", 0.8),
+            source("AWAY", "match", "overseas", 0.9),
+            source("CHECK", "conditional", "domestic_named", 1.0),
+        ], patient={})["decision_paths"]
+        self.assertEqual([item["trial_id"] for item in paths], ["AWAY", "HOME", "CHECK"])
+        self.assertTrue(all(
+            item["recommendation_bucket"] == "overall_best" for item in paths
+        ))
+
+    def test_top_paths_suppress_near_duplicate_core_agents(self):
+        def source(trial_id, agent, score):
+            return {
+                "trial_id": trial_id, "title": trial_id,
+                "interventions": [f"Drug: {agent}"], "overall_status": "RECRUITING",
+                "feasibility": {"composite": score},
+                "gating": {"verdict": "match", "blockers_failed": [], "blockers_pending": []},
+                "risk_summary": {"risks": []}, "efficacy_summary": {},
+            }
+        paths = ground_decision_report({}, [
+            source("A1", "EB-DNK101", 0.95),
+            source("A2", "EB-DNK101", 0.94),
+            source("B", "TSN1611", 0.90),
+            source("C", "VS-7375", 0.85),
+        ], patient={})["decision_paths"]
+        self.assertEqual([item["trial_id"] for item in paths], ["A1", "B", "C"])

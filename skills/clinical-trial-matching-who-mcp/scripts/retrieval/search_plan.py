@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 import re
 from typing import Any
 
@@ -180,24 +181,39 @@ def build_baseline_search_plan(patient: dict[str, Any]) -> dict[str, Any]:
         str(key).strip() for key, value in (patient.get("biomarkers_known") or {}).items()
         if value not in (None, "", "unknown")
     ]
-    anchor = biomarker_terms[0] if biomarker_terms else "biomarker selected"
+    anchor = biomarker_terms[0] if biomarker_terms else "precision oncology"
+
+    try:
+        max_terms = max(1, min(20, int(os.environ.get(
+            "SEARCH_MAX_TERMS_PER_DIMENSION", "6"
+        ))))
+    except ValueError as exc:
+        raise ValueError("SEARCH_MAX_TERMS_PER_DIMENSION must be an integer") from exc
 
     def queries(terms: list[str], condition: str | None = cancer) -> list[dict[str, Any]]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for value in terms:
+            term = re.sub(r"\s+", " ", str(value or "")).strip()
+            key = term.casefold()
+            if term and key not in seen:
+                seen.add(key)
+                unique.append(term)
         return [
             {"condition": condition or None, "term": term}
-            for term in dict.fromkeys(term for term in terms if term)
+            for term in unique[:max_terms]
         ]
 
     groups = [
         {
             "dimension": "disease_biomarker", "label": "1. Disease + exact biomarker",
             "source": "both",
-            "queries": queries(biomarker_terms or ["molecularly selected"]),
+            "queries": queries(biomarker_terms or ["precision oncology"]),
         },
         {
             "dimension": "pan_tumor", "label": "2. Pan-tumor biomarker recall",
             "source": "both",
-            "queries": queries(biomarker_terms or ["biomarker selected"], "solid tumor"),
+            "queries": queries(biomarker_terms or ["precision oncology"], "solid tumor"),
         },
         {
             "dimension": "combination_targets", "label": "3. Rational combination targets",
@@ -245,6 +261,8 @@ def build_baseline_search_plan(patient: dict[str, Any]) -> dict[str, Any]:
         },
         "generation_audit": {
             "mode": "deterministic_baseline",
+            "max_terms_per_dimension": max_terms,
+            "query_count": sum(len(group["queries"]) for group in groups),
             "requires_human_review": not bool(named_agents and combinations and pathways),
             "limitations": (
                 "Named-agent, rational-combination, pathway, and Chinese synonym "

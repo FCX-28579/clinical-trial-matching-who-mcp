@@ -136,6 +136,21 @@ def normalize_cancer_buddy(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         for item in episodes
         if _settled(item) and item.get("documented_line_label") and item.get("ended_at")
     }
+    ongoing_raw = current.get("therapy_ongoing")
+    if ongoing_raw is None:
+        ongoing_raw = current.get("ongoing")
+    if isinstance(ongoing_raw, bool):
+        current_therapy_ongoing = ongoing_raw
+    elif str(ongoing_raw or "").strip().casefold() in {
+        "true", "yes", "ongoing", "active", "currently_receiving",
+    }:
+        current_therapy_ongoing = True
+    elif str(ongoing_raw or "").strip().casefold() in {
+        "false", "no", "ended", "stopped", "completed", "discontinued",
+    }:
+        current_therapy_ongoing = False
+    else:
+        current_therapy_ongoing = None
     lab_values: dict[str, Any] = {}
     for panel in labs.get("panels") or []:
         values = [
@@ -191,7 +206,8 @@ def normalize_cancer_buddy(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "prior_therapies": [item.get("regimen") for item in history if item.get("regimen")],
         "treatment_history": history,
         "current_therapy_status": current.get("regimen"),
-        "current_therapy_ongoing": bool(current.get("regimen")),
+        # Regimen presence is not proof that treatment is still ongoing.
+        "current_therapy_ongoing": current_therapy_ongoing,
         "organ_function": "source_values_available" if lab_values else "unknown",
         "laboratory_values": lab_values,
         "comorbidities": [

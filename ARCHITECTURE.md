@@ -17,6 +17,8 @@ Cancer Buddy archive or legacy patient JSON
 -> decision-synthesizer
 -> decision_grounding.py
 -> full_pipeline.py finalize
+-> country-based report language routing
+-> provider-neutral patient-facing translation (China only)
 -> formal report + run manifest
 ```
 
@@ -37,6 +39,7 @@ Cancer Buddy archive or legacy patient JSON
 | Decision authority | `pipeline/decision_grounding.py` | Restore eligibility, efficacy, risk, blockers, and timeline limits from validated upstream data |
 | State machine | `pipeline/run_formal_pipeline.py` | Enforce stage order and resume a formal run |
 | Final quality gate | `pipeline/full_pipeline.py` | Enforce coverage, retrieval, freshness, and produce the only formal report |
+| Report translation | `render/report_translation.py` | Translate only China-patient narratives through configured model APIs while preserving identifiers and clinical decisions |
 | Presentation | `presentation/`, `render/` | Titles, links, geography grouping, mechanism sections, HTML |
 
 The retrieval boundary compiles every disease condition and its

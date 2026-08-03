@@ -1,40 +1,14 @@
-# Diversity bucketing for Top-N decision paths
+# Patient-fit ranking for Top-N decision paths
 
 ## Goal
 
-Avoid emitting 3 paths that are all variants of the same drug class (e.g. 3 different KRAS G12C inhibitors). Patient and clinician benefit from seeing options across different mechanisms, regions, and modalities.
+Recommend the trials that best fit this patient. Diversity is useful only as a tie-breaker and must never displace a more suitable trial.
 
-## Slots
+## Ranking
 
-Default N=3:
+Default N=3 is a maximum, not a quota. Filter known molecular/cohort mismatches, failed blockers, inactive studies, and overlap with the patient's ongoing core therapy. Then rank every remaining trial together by exact disease/cohort/biomarker fit, gating verdict and unresolved blockers, treatment-line compatibility, recruiting access, evidence quality, and finally feasibility. Do not reserve geographic or mechanism slots. Return fewer than N paths if necessary.
 
-| Slot | Role | Selection criterion |
-|---|---|---|
-| 1 | `primary` | Highest composite score, China-accessible, non-Phase-1-only |
-| 2 | `alternative_mechanism` OR `secondary` | Best path with a DIFFERENT drug class than slot 1 |
-| 3 | `secondary_cell_therapy` OR `secondary_overseas` OR `secondary` | Best cell therapy OR best different-region path |
-
-If a slot has no qualifying candidate, **leave the slot empty** rather than filling with a worse path just for diversity.
-
-## Composite score formula
-
-```
-composite = 0.5 * feasibility_score
-          + 0.3 * (1 - confidence_penalty_from_gating)
-          + 0.2 * evidence_tier_weight
-```
-
-Where `evidence_tier_weight`:
-- `trial_specific_phase_3` = 1.0
-- `trial_specific_phase_2` = 0.9
-- `phase_3_rct` = 0.85
-- `phase_2_published` = 0.75
-- `mutation_class_baseline` = 0.6
-- `drug_class_baseline` = 0.45
-- `drug_class_baseline_other_cancer` = 0.2
-- `no_data` = 0.1
-
-This formula intentionally weights feasibility (50%) over evidence (20%) — a Phase 3 trial in Boston with 0 China sites scores worse than a Phase 1 trial in Beijing with 11 China sites for a Chinese patient.
+Do not collapse clinical fit into a weighted composite score: a high site or feasibility score cannot compensate for the wrong cohort, biomarker, treatment line, or ongoing-drug overlap.
 
 ## Mechanism class tags (for diversity grouping)
 
@@ -54,19 +28,19 @@ Use the patient's mutation/biology to tag mechanisms:
 - `immune_checkpoint_inhibitor`
 - `radioconjugate`
 
-Two paths with the same mechanism tag = same bucket (avoid both in Top 3).
+Use these tags only to explain the ranking. Suppress an explicitly linked duplicate, the same core study agent, or a nearly identical intervention set; do not suppress distinct trials merely because they share a mechanism or target.
 
 ## Anti-pattern: forcing diversity at the cost of fit
 
 **Critical bug from v1.7.x**: the diversity bucketing forced a "secondary" slot to be filled with NCT06895031 (JYP0015, KRAS G12D drug applied to a G12C patient) just because it was the next-best "different mechanism". The drug was wrong for the patient.
 
-**v2 rule**: when filling a diversity slot, the candidate MUST still pass these checks:
+**Current rule**: every recommended candidate MUST pass these checks:
 
 1. Trial mutation requirement matches patient mutation (or is mutation-agnostic)
 2. Trial drug class is appropriate for patient mutation (G12C drugs for G12C patients; G12D drugs for G12D patients; pan-RAS / mutation-agnostic drugs OK for any RAS-mutant)
 3. Patient has not already failed an equivalent regimen in the same drug class
 
-If no candidate passes these checks for a diversity slot, leave the slot empty.
+If fewer than three non-duplicate candidates pass, return fewer than three recommendations.
 
 ## Path-vs-path comparison narrative
 
@@ -90,7 +64,7 @@ Note: this is one of the v1.7.x bugs — alternatives_comparison was sometimes s
 "decision_paths": [
   { ...slot 1 path... },
   { ...slot 2 path... },
-  null  // no qualifying candidate for cell therapy / overseas slot
+  null  // no third candidate meets the recommendation threshold
 ]
 ```
 

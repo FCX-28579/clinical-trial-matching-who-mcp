@@ -103,3 +103,16 @@ class PatientInputTests(unittest.TestCase):
             self._archive(root, with_location=False)
             with self.assertRaisesRegex(ValueError, "no explicit patient country"):
                 load_patient_input(root)
+
+    def test_regimen_presence_does_not_imply_ongoing_treatment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._archive(root)
+            summary = json.loads((root / "patient_summary.json").read_text())
+            summary["current_status"] = {
+                "regimen": "RMC-6236", "therapy_ongoing": False, "ecog": 1,
+            }
+            self._write(root, "patient_summary.json", summary)
+            patient, _ = load_patient_input(root)
+        self.assertEqual(patient["current_therapy_status"], "RMC-6236")
+        self.assertIs(patient["current_therapy_ongoing"], False)

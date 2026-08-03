@@ -53,13 +53,20 @@ PATIENT_STAGE_FIELDS = {
 }
 
 
-def report_language(patient: dict[str, Any]) -> str:
-    """Return the one report language used by jobs, validation and rendering."""
-    configured = str(patient.get("report_language") or "").strip()
-    if configured:
-        return configured
+CHINA_COUNTRY_NAMES = frozenset({
+    "china", "mainland china", "people's republic of china", "pr china",
+    "prc", "cn", "chn", "\u4e2d\u56fd", "\u4e2d\u56fd\u5927\u9646",
+})
+
+
+def is_china_patient(patient: dict[str, Any]) -> bool:
     country = str(patient.get("country") or "").strip().casefold()
-    return "zh-CN" if country in {"china", "\u4e2d\u56fd", "mainland china"} else "en"
+    return country in CHINA_COUNTRY_NAMES
+
+
+def report_language(patient: dict[str, Any]) -> str:
+    """Use Chinese only for patients whose explicit current country is China."""
+    return "zh-CN" if is_china_patient(patient) else "en"
 
 
 def compact_patient_for_stage(patient: dict[str, Any], stage: str) -> dict[str, Any]:
@@ -104,6 +111,23 @@ def compact_trial_for_analysis(
     if len(sites) > 10:
         compact["patient_country_sites"] = sites[:10]
         compact["patient_country_sites_truncated"] = True
+    official_title = str(trial.get("title") or trial.get("scientific_title") or "").strip()
+    interventions = [
+        str(item).strip() for item in (trial.get("interventions") or [])
+        if str(item).strip()
+    ]
+    compact["identity_context"] = {
+        "canonical_trial_id": str(
+            trial.get("primary_registry_id") or trial.get("id") or trial.get("trial_uid") or ""
+        ).strip(),
+        "official_registry_title": official_title,
+        "registry_interventions": interventions[:20],
+        "instruction": (
+            "Treat these registry fields as authoritative. Do not invent a regimen by "
+            "combining interventions across arms; state that the specific regimen requires "
+            "confirmation when arm mapping is unavailable."
+        ),
+    }
     return compact
 
 class AnalysisContractError(ValueError):
@@ -397,9 +421,12 @@ def validate_analysis_bundle(
         raise AnalysisContractError("Formal analysis must use mode=llm_subskills")
     _require(provenance.get("model"), "analysis_provenance.model is required")
     _require(provenance.get("completed_at"), "analysis_provenance.completed_at is required")
-    expected_language = report_language(patient)
-    if provenance.get("output_language") != expected_language:
-        raise AnalysisContractError(f"analysis output_language must be {expected_language}")
+    # Language consistency is a presentation-quality signal, not analysis
+    # corruption. A valid analysis in another supported language remains
+    # usable and is disclosed by finalize as a report warning.
+    output_language = provenance.get("output_language")
+    if output_language not in {"zh-CN", "en"}:
+        provenance["output_language"] = str(output_language or "unknown")
     analyzed = bundle.get("analyzed_trials")
     if not isinstance(analyzed, list):
         raise AnalysisContractError("analyzed_trials must be a list")

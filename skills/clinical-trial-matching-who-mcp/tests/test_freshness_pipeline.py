@@ -58,16 +58,32 @@ class FreshnessPipelineTests(unittest.TestCase):
             )
 
     def test_nct_live_status_is_read_from_direct_api(self):
-        body = json.dumps({"protocolSection": {"statusModule": {
-            "overallStatus": "TERMINATED",
-            "lastUpdatePostDateStruct": {"date": "2026-07-20"},
-        }}})
+        body = json.dumps({"protocolSection": {
+            "statusModule": {
+                "overallStatus": "TERMINATED",
+                "lastUpdatePostDateStruct": {"date": "2026-07-20"},
+            },
+            "contactsLocationsModule": {"locations": [{
+                "facility": "Beijing Cancer Hospital", "status": "RECRUITING",
+                "city": "Beijing", "country": "China",
+            }]},
+        }})
         result = verify_one(
             {"id": "NCT12345678"},
             fetcher=lambda url, timeout: (url, body),
         )
         self.assertEqual(result["status"], "inactive")
         self.assertEqual(result["method"], "clinicaltrials.gov_v2_api")
+        self.assertEqual(result["sites"][0]["country"], "China")
+
+        partitioned = verify_and_partition(
+            [{"id": "NCT12345678"}], workers=1,
+            verifier=lambda trial, timeout: {**result, "status": "active"},
+            patient={"country": "中国"},
+        )
+        enriched = partitioned["active_or_unknown"][0]
+        self.assertEqual(enriched["patient_country_site_count"], 1)
+        self.assertEqual(enriched["patient_country_sites"][0]["city"], "Beijing")
 
     def test_only_explicit_inactive_status_is_removed(self):
         statuses = iter(("inactive", "error", "unknown", "active"))

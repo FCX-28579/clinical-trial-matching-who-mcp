@@ -15,7 +15,8 @@ GENERIC_INTERVENTIONS = {
     "product", "drug", "treatment", "none", "solution for infusion",
     "solution for injection", "placebo", "best supportive care", "n/a", "na",
     "not applicable", "not available", "standard of care", "soc therapy",
-    "for", "clinical trial", "see study design above",
+    "for", "clinical trial", "see study design above", "cell", "biopsy",
+    "phase 1", "phase 1a", "phase i", "phase ia",
 }
 NON_THERAPEUTIC_TERMS = {
     "biopsy procedure", "biospecimen", "blood draw", "computed tomography", "ct scan",
@@ -36,7 +37,8 @@ DOSING_SENTENCE_TERMS = {
     "is administered", "orally administered", "once daily", "twice daily", "apply to",
     "continuous administration", "accelerated escalation group", "study design above",
     "patients can be enrolled", "patient was enrolled", "once every",
-    "on the premise of confirming", "will be maintained",
+    "on the premise of confirming", "will be maintained", "will continue until",
+    "until disease progression", "dose expansion", "each cycle",
 }
 COUNTRY_ALIASES = {
     "中国": "china", "mainland china": "china", "pr china": "china",
@@ -117,6 +119,8 @@ def _usable_agent_name(name: str) -> bool:
         return False
     if folded in {"autologous", "experimental", "experimental drug", "control", "control rx"}:
         return False
+    if re.fullmatch(r"(?i)phase\s*[0-4ivx]+[a-z]?(?:\s+arm\s+[a-z0-9]+)?", name):
+        return False
     if any(term in folded for term in NON_THERAPEUTIC_TERMS | DOSING_SENTENCE_TERMS):
         return False
     if re.fullmatch(r"(?i)[\d.\s/%-]*(?:mg|mcg|ug|\u03bcg|g|ml|q\d+w?)[\d.\s/%-]*", name):
@@ -163,41 +167,51 @@ def _clean_registry_title(value: Any) -> str:
     return title
 
 
+def _title_agent_codes(*titles: str) -> list[str]:
+    """Extract study-drug codes without treating common biomarkers as drugs."""
+    excluded = {
+        "NCT", "KRAS", "NRAS", "HRAS", "BRAF", "EGFR", "MSI", "MMR",
+        "PDAC", "NSCLC", "CRC", "MCRC", "MPDAC", "RECIST", "RP2D",
+    }
+    output: list[str] = []
+    for title in titles:
+        for value in re.findall(r"\b[A-Z]{1,8}(?:-[A-Z0-9]+|\d[A-Z0-9-]*)\b", title or ""):
+            prefix = re.match(r"[A-Z]+", value)
+            if not prefix or prefix.group(0) in excluded:
+                continue
+            if re.fullmatch(r"[A-Z]\d+[A-Z]", value):
+                continue
+            output.append(value)
+    return list(dict.fromkeys(output))
+
+
+def registry_is_inactive(trial: dict[str, Any]) -> bool:
+    status = str(trial.get("overall_status") or "").strip().upper().replace(" ", "_")
+    return status in {
+        "ACTIVE_NOT_RECRUITING", "COMPLETED", "NO_LONGER_RECRUITING",
+        "NOT_RECRUITING", "SUSPENDED", "TERMINATED", "WITHDRAWN",
+    } or (trial.get("registry_status_rule") or {}).get("rule_id") == "REGISTRY-INACTIVE"
+
+
 def patient_facing_title(trial: dict[str, Any], language: str) -> str:
     names = intervention_names(trial)
     public_title = _clean_registry_title(trial.get("title"))
     scientific_title = _clean_registry_title(trial.get("scientific_title"))
-    raw_title = public_title or scientific_title
-
-    if "amivantamab" in raw_title.casefold() and "folfiri" in raw_title.casefold():
-        base = "Amivantamab + FOLFIRI vs Cetuximab/Bevacizumab + FOLFIRI"
-    else:
-        coded = [
-            name for name in names
-            if re.search(r"(?i)^(?:[A-Z]{2,8}-?\d|RMC-|JAB-|BGB-|D3S-)", name)
-        ]
-        ordered = coded + [name for name in names if name not in coded]
-        base = " + ".join(ordered[:4])
-
-    sentence_like = any(term in base.casefold() for term in DOSING_SENTENCE_TERMS)
-    if len(base) > 120 or sentence_like:
-        base = ""
-
-    if not base:
-        agent_source = f"{public_title} {scientific_title}"
-        agents = re.findall(
-            r"\b(?:[A-Z]{2,8}[- ]?\d{3,8}|[A-Za-z]{2,8}\d+(?:-[A-Za-z0-9]+)+|sotorasib|adagrasib|cetuximab|"
-            r"bevacizumab|amivantamab|[a-z][a-z-]{3,}(?:mab|nib|parib|rasib|sertib))\b",
-            agent_source,
-            flags=re.I,
-        )
-        agents = list(dict.fromkeys(agent.strip() for agent in agents))
-        base = " + ".join(agents[:4])
-
-    if not base:
-        base = scientific_title or public_title
+    title_codes = _title_agent_codes(public_title, scientific_title)
+    title_text = f"{public_title} {scientific_title}".casefold()
+    title_mentions = [
+        (title_text.find(name.casefold()), name)
+        for name in names if name.casefold() in title_text
+    ]
+    title_named_agent = min(title_mentions, default=(-1, ""))[1]
+    core = title_codes[0] if title_codes else title_named_agent or (names[0] if names else "")
+    # This is a browsing label, not a synthesized regimen. A global
+    # intervention list can span mutually exclusive study arms.
+    base = core or public_title or scientific_title
     if not base:
         base = str(trial.get("id") or "Untitled trial")
+    if core and len(names) > 1:
+        base += "（多臂）" if language == "zh-CN" else " (multi-arm)"
 
     mechanism = trial.get("mechanism_category") or {}
     label = (
@@ -205,12 +219,24 @@ def patient_facing_title(trial: dict[str, Any], language: str) -> str:
         or mechanism.get("label")
         or ("其他" if language == "zh-CN" else "Other")
     )
-    max_base = max(80, 180 - len(label) - 3)
+    verdict = str((trial.get("gating") or {}).get("verdict") or "")
+    if registry_is_inactive(trial):
+        qualifier = "已关闭招募" if language == "zh-CN" else "Recruitment closed"
+    elif verdict == "exclude":
+        qualifier = "不符合关键条件" if language == "zh-CN" else "Key eligibility conflict"
+    elif verdict == "conditional":
+        qualifier = "需确认入组条件" if language == "zh-CN" else "Eligibility to confirm"
+    else:
+        qualifier = ""
+    max_base = max(48, 110 - len(label) - len(qualifier) - 6)
     if len(base) > max_base:
         shortened = base[:max_base].rsplit(" ", 1)[0].rstrip(" +,;/.-")
         shortened = re.sub(r"(?i)\s+(?:with|for|of|in|and|or|the|a|an|to)$", "", shortened).rstrip(" +,;/.-")
         base = shortened + "..."
-    return f"{base or 'Untitled trial'} · {label}"
+    parts = [base or "Untitled trial", label]
+    if qualifier:
+        parts.append(qualifier)
+    return " · ".join(parts)
 
 def assess_country_evidence(trial: dict[str, Any], patient: dict[str, Any]) -> dict[str, Any]:
     country = str(patient.get("country") or "").strip()

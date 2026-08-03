@@ -1,5 +1,7 @@
 # Repository Guidance
 
+- During design, review, optimization, and generation work, do not add excessive or redundant gates unless explicitly required.
+
 - Treat `clinical-trial-matching-skill-who-mcp` as a parallel project. Never modify the original sibling project from this repository.
 - Preserve patient location fields and keep retrieval global; apply country only when labeling domestic/international access.
 - Always call MCP metadata before search and carry `database_as_of` through the report.

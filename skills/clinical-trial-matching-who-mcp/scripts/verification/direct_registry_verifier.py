@@ -139,6 +139,36 @@ def _who_fallback_url(trial: dict[str, Any]) -> str:
     return f"{WHO_DETAIL}?TrialID={trial_id}" if trial_id else ""
 
 
+def _ctgov_sites(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    module = (payload.get("protocolSection") or {}).get("contactsLocationsModule") or {}
+    sites = []
+    for location in module.get("locations") or []:
+        if not isinstance(location, dict):
+            continue
+        site = {
+            "site_name": location.get("facility") or "",
+            "facility": location.get("facility") or "",
+            "status": _status(location.get("status")),
+            "city": location.get("city") or "",
+            "province": location.get("state") or "",
+            "country": location.get("country") or "",
+            "postal_code": location.get("zip") or "",
+        }
+        if any(str(value or "").strip() for value in site.values()):
+            sites.append(site)
+    return sites
+
+
+def _country_key(value: Any) -> str:
+    raw = str(value or "").strip().casefold()
+    aliases = {
+        "中国": "china", "mainland china": "china", "pr china": "china",
+        "people's republic of china": "china", "usa": "united states",
+        "us": "united states", "u.s.": "united states",
+    }
+    return aliases.get(raw, raw)
+
+
 def _webpage_status(body: str) -> str:
     plain = " ".join(re.sub(r"<[^>]+>", " ", body).split())
     chinese = re.search(r"(?:招募状态|募集状态|研究状态)\s*[:：]?\s*([^\s,，。；;]{1,20})", plain)
@@ -191,11 +221,13 @@ def verify_one(
             module = (payload.get("protocolSection") or {}).get("statusModule") or {}
             live_status = _status(module.get("overallStatus"))
             updated = (module.get("lastUpdatePostDateStruct") or {}).get("date", "")
+            sites = _ctgov_sites(payload)
             source_url = f"https://clinicaltrials.gov/study/{nct}"
             method = "clinicaltrials.gov_v2_api"
         else:
             live_status = _webpage_status(body)
             updated = ""
+            sites = []
             source_url, method = resolved_url, "direct_registry_webpage"
         if live_status in ACTIVE:
             result_status = "active"
@@ -211,6 +243,8 @@ def verify_one(
             "method": method,
             "checked_at": checked_at,
             "http_reachable": True,
+            "sites": sites,
+            "countries": sorted({site["country"] for site in sites if site.get("country")}),
         }
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
         fallback_url = _who_fallback_url(trial)
@@ -253,6 +287,7 @@ def verify_one(
 def verify_and_partition(
     trials: list[dict[str, Any]], *, workers: int = 4, timeout: float = 20,
     verifier: Callable[..., dict[str, Any]] = verify_one,
+    patient: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     copies = [deepcopy(trial) for trial in trials]
     with ThreadPoolExecutor(max_workers=max(1, min(workers, 32))) as pool:
@@ -263,6 +298,22 @@ def verify_and_partition(
         trial["live_registry_verification"] = result
         if result.get("overall_status"):
             trial["overall_status"] = result["overall_status"]
+        if result.get("sites"):
+            trial["sites"] = result["sites"]
+            trial["countries"] = result.get("countries") or trial.get("countries") or []
+            if patient:
+                country = _country_key(patient.get("country"))
+                patient_sites = [
+                    site for site in result["sites"]
+                    if _country_key(site.get("country")) == country
+                ]
+                trial["patient_country_sites"] = patient_sites
+                trial["patient_country_site_count"] = len(patient_sites)
+                trial["patient_country_location_records"] = [
+                    {"country": site.get("country"), "evidence_type": "direct_registry_site"}
+                    for site in patient_sites
+                ]
+                trial["patient_country_location_record_count"] = len(patient_sites)
         (inactive if result.get("status") == "inactive" else active_or_unknown).append(trial)
     return {
         "active_or_unknown": active_or_unknown,

@@ -130,6 +130,21 @@ class GenericPipelineContractTests(unittest.TestCase):
                 "analysis_provenance": {"mode": "deterministic_heuristic", "model": "none", "completed_at": "now", "output_language": "en"},
                 "analyzed_trials": [item], "decision_report": {"decision_paths": [], "goals_of_care": {}},
             }, patient, ["NCT1"])
+
+    def test_analysis_language_mismatch_is_disclosed_not_rejected(self):
+        patient = {"cancer_type": "NSCLC", "report_language": "zh-CN"}
+        item = valid_analysis("NCT-LANG", "NSCLC")
+        bundle = {
+            "schema_version": "clinical-subskills-analysis-v1",
+            "analysis_provenance": {
+                "mode": "llm_subskills", "model": "test-model",
+                "completed_at": "now", "output_language": "en",
+            },
+            "analyzed_trials": [item],
+            "decision_report": {"decision_paths": [], "goals_of_care": {}},
+        }
+        by_id = validate_analysis_bundle(bundle, patient, ["NCT-LANG"])
+        self.assertIn("NCT-LANG", by_id)
         del item["efficacy_context"]
         with self.assertRaises(AnalysisContractError):
             validate_analysis_bundle({
@@ -405,9 +420,18 @@ class GenericPipelineContractTests(unittest.TestCase):
         self.assertIn("patient_country_sites", compact)
         self.assertNotIn("sites", compact)
         self.assertNotIn("country_records", compact)
-    def test_report_language_override_is_shared(self):
+        self.assertEqual(compact["identity_context"]["canonical_trial_id"], "T1")
+        self.assertEqual(
+            compact["identity_context"]["official_registry_title"],
+            "Targeted trial",
+        )
+    def test_report_language_is_derived_from_explicit_country(self):
         patient = {"country": "China", "report_language": "en"}
-        self.assertEqual(pipeline._language(patient), "en")
+        self.assertEqual(pipeline._language(patient), "zh-CN")
+        self.assertEqual(
+            pipeline._language({"country": "United States", "report_language": "zh-CN"}),
+            "en",
+        )
 
     def test_prefilter_limits_active_trials_and_remains_auditable(self):
         trials = []
@@ -493,7 +517,7 @@ class RegistryBoundaryTests(unittest.TestCase):
             "patient_country_site_count": 0, "patient_country_location_record_count": 1,
         }
         title = patient_facing_title(ctis, "en")
-        self.assertTrue(title.startswith("Amivantamab + FOLFIRI vs"))
+        self.assertTrue(title.startswith("Amivantamab (multi-arm)"))
         self.assertNotIn("Product Code", title)
         self.assertLessEqual(len(title), 125)
         noisy = {
@@ -521,14 +545,16 @@ class RegistryBoundaryTests(unittest.TestCase):
             "interventions": ["Low Dose MSH2 tumor cell vaccine", "Medium Dose MSH2 tumor cell vaccine", "High Dose MSH2 tumor cell vaccine"],
             "mechanism_category": {"label_en": "Cell therapy"},
         }, "en")
-        self.assertEqual(dose_title.count("MSH2 tumor cell vaccine"), 1)
+        self.assertIn("MSH2 tumor cell vaccine", dose_title)
+        self.assertNotIn(" + ", dose_title)
         regimen_title = patient_facing_title({
             "id": "NCT-REGIMEN",
             "title": "A Study of OBI-833 and Erlotinib in NSCLC",
             "interventions": ["30 \u03bcg OBI-833/100 \u03bcg OBI-821", "Erlotinib (150 mg daily)"],
             "mechanism_category": {"label_en": "Cell and biologic therapy"},
         }, "en")
-        self.assertIn("OBI-833/OBI-821 + Erlotinib", regimen_title)
+        self.assertIn("OBI-833", regimen_title)
+        self.assertNotIn("OBI-833/OBI-821 +", regimen_title)
         self.assertNotIn("150 mg", regimen_title)
         escalation_title = patient_facing_title({
             "id": "NCT-ESCALATION",
@@ -548,10 +574,45 @@ class RegistryBoundaryTests(unittest.TestCase):
         self.assertNotIn("Clinical Study", long_title)
         self.assertLessEqual(len(long_title), 180)
         self.assertTrue(long_title.endswith("Other"))
+        for generic in (
+            "will continue until disease progression", "Cell", "Biopsy", "Phase 1a",
+            "Each Cycle D1-5 + Part 2: dose expansion",
+        ):
+            cleaned = patient_facing_title({
+                "id": "NCT-GENERIC",
+                "scientific_title": "A Study of RMC-6236 in Advanced Solid Tumors",
+                "interventions": [generic],
+                "mechanism_category": {"label_en": "Targeted therapy"},
+            }, "en")
+            self.assertIn("RMC-6236", cleaned)
+            self.assertNotIn(generic, cleaned)
         self.assertEqual(assess_country_evidence(ctis, {"country": "China"})["class"], "country_unverified")
         self.assertIn("trialsearch.who.int/Trial2.aspx", resolved_trial_url(ctis))
         chictr = {"id": "ChiCTR2400082391", "patient_country_site_count": 0, "patient_country_location_record_count": 1}
         self.assertEqual(assess_country_evidence(chictr, {"country": "China"})["class"], "domestic_registry")
+
+    def test_multicohort_title_never_flattens_global_interventions(self):
+        title = patient_facing_title({
+            "id": "NCT-MULTI",
+            "title": "A Multi-cohort Study of Setidegrasib in Solid Tumors",
+            "interventions": [
+                "Setidegrasib", "Cetuximab", "Leucovorin", "Oxaliplatin",
+            ],
+            "mechanism_category": {"label_en": "Targeted therapy"},
+        }, "en")
+        self.assertIn("Setidegrasib (multi-arm)", title)
+        self.assertNotIn("Setidegrasib + Cetuximab", title)
+
+    def test_title_uses_official_core_drug_code_and_recruitment_state(self):
+        title = patient_facing_title({
+            "id": "NCT1",
+            "title": "A Study of GDC-7035 as a Single Agent and in Combination",
+            "interventions": ["Drug: Phase I Arm A", "Drug: Phase I Arm B"],
+            "overall_status": "COMPLETED",
+            "gating": {"verdict": "exclude"},
+            "mechanism_category": {"label_zh": "靶点治疗"},
+        }, "zh-CN")
+        self.assertEqual(title, "GDC-7035 · 靶点治疗 · 已关闭招募")
 
 
 if __name__ == "__main__":

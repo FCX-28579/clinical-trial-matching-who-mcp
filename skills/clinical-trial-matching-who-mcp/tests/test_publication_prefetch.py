@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 PIPELINE = Path(__file__).resolve().parents[1] / "scripts" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
 
-from publication_prefetch import enrich_deep_jobs_file
+from publication_prefetch import _cache_name, _query_for_trial, enrich_deep_jobs_file
 
 
 class PublicationPrefetchTests(unittest.TestCase):
@@ -52,24 +52,39 @@ class PublicationPrefetchTests(unittest.TestCase):
             self.assertTrue(trial["publication_prefetch"]["searched_at"])
             self.assertEqual(len(trial["publication_prefetch"]["queries"]), 1)
 
-    def test_legacy_cache_receives_auditable_search_time(self) -> None:
+    def test_cache_key_changes_with_the_effective_query(self) -> None:
+        first = _query_for_trial({
+            "id": "NCT1", "interventions": ["Drug: Agent X"], "disease_text": "CRC",
+        })
+        second = _query_for_trial({
+            "id": "NCT1", "interventions": ["Drug: Agent Y"], "disease_text": "CRC",
+        })
+        self.assertIn('"NCT1"', first)
+        self.assertIn('("Agent X") AND "CRC"', first)
+        self.assertNotEqual(_cache_name("NCT1", first), _cache_name("NCT1", second))
+
+    def test_error_cache_is_refreshed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             jobs = root / "deep_jobs.json"
             jobs.write_text(json.dumps({
                 "stage": "deep",
-                "batches": [{"trials": [{"id": "NCT1"}]}],
+                "batches": [{"trials": [{"id": "NCT1", "disease_text": "CRC"}]}],
             }), encoding="utf-8")
             cache = root / "cache"
             cache.mkdir()
-            (cache / "NCT1-80ef856dea.json").write_text(json.dumps({
-                "status": "no_results", "queries": ["NCT1"], "candidates": [],
+            query = _query_for_trial({"id": "NCT1", "disease_text": "CRC"})
+            (cache / _cache_name("NCT1", query)).write_text(json.dumps({
+                "status": "error", "queries": [query], "candidates": [],
             }), encoding="utf-8")
-            with patch.dict(os.environ, {"PUBLICATION_SEARCH_MODE": "auto"}):
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = b'{"resultList":{"result":[]}}'
+            with patch.dict(os.environ, {"PUBLICATION_SEARCH_MODE": "auto"}), patch(
+                "publication_prefetch.urllib.request.urlopen", return_value=response
+            ) as opener:
                 result = enrich_deep_jobs_file(jobs, cache)
-            trial = json.loads(jobs.read_text(encoding="utf-8"))["batches"][0]["trials"][0]
-            self.assertEqual(result["cache_hits"], 1)
-            self.assertTrue(trial["publication_prefetch"]["searched_at"])
+            self.assertEqual(result["cache_hits"], 0)
+            opener.assert_called_once()
 
     def test_off_mode_performs_no_network_work(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

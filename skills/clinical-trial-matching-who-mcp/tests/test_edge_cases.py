@@ -91,6 +91,14 @@ class ReportSafetyTests(unittest.TestCase):
         targeted = {"title": "Calderasib plus pembrolizumab", "interventions": ["Calderasib", "Pembrolizumab"]}
         noisy_analysis = {"gating": {"exclusion_evaluation": [{"criterion": "prior cell therapy"}]}}
         self.assertEqual(classify_treatment_mechanism(targeted, "conditional", noisy_analysis)[2], "targeted_therapy")
+        comparator_noise = {
+            "efficacy_context": {"caveats": ["CAR-T may be considered as an alternative"]},
+            "risk_annotation": {"trial_mechanisms_identified": ["KRAS inhibitor"]},
+        }
+        self.assertEqual(
+            classify_treatment_mechanism(targeted, "conditional", comparator_noise)[2],
+            "targeted_therapy",
+        )
 
     def test_report_escapes_html_and_uses_registry_source_url(self):
         patient = {"patient_id": "<script>alert(1)</script>", "country": "China", "mutations": [], "treatment_history": []}
@@ -108,6 +116,17 @@ class ReportSafetyTests(unittest.TestCase):
             "counts": {"match": 0, "conditional": 1, "exclude": 0},
             "geography_audit": {"overseas": 1}, "portal_delta": {"status": "not_executed"},
             "database_as_of": "2026-07-09", "database_metadata": {"schema_version": "3"},
+            "run_manifest": {"prepared_sha256": "abc", "analysis_sha256": "def"},
+            "decision_report": {
+                "patient_summary": {"summary_text": "患者摘要正文"},
+                "consistency_flags": [{"flag": "需要核实肝功能"}],
+                "decision_paths": [],
+                "goals_of_care": {
+                    "triggered": True,
+                    "reasons": ["疾病进展较快"],
+                    "discussion_recommendation": "讨论标准治疗与临床试验。",
+                },
+            },
         }
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "report.html"
@@ -117,6 +136,41 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertIn("https://example.org/trial/NL-TEST", html)
         self.assertNotIn(">0.7<", html)
+        self.assertIn('data-filter="all"', html)
+        self.assertIn('data-filter="domestic"', html)
+        self.assertIn('data-filter="country_unverified"', html)
+        self.assertIn('data-filter="overseas"', html)
+        self.assertNotIn('data-filter="actionable"', html)
+        self.assertNotIn('data-filter="excluded"', html)
+        self.assertIn("患者摘要", html)
+        self.assertIn("患者摘要正文", html)
+        self.assertIn("需要核实肝功能", html)
+        self.assertIn("讨论标准治疗与临床试验", html)
+        self.assertIn("检索数据 SHA-256", html)
+        self.assertIn("分析结果 SHA-256", html)
+
+    def test_native_registry_is_displayed_in_domestic_filter(self):
+        patient = {"patient_id": "P1", "country": "China", "mutations": []}
+        trial = {
+            "id": "ChiCTR1", "resolved_source_url": "https://example.org/ChiCTR1",
+            "display_title": "Trial", "phases": [],
+            "mechanism_category": {"category": "other", "label_zh": "其他", "label_en": "Other"},
+            "country_assessment": {"class": "domestic_registry"},
+            "gating": {"verdict": "conditional", "satisfied": [], "pending": [], "exclusion_reasons": []},
+            "risk_context": [], "efficacy_context": "",
+        }
+        payload = {
+            "language": "zh-CN", "patient": patient, "trials": [trial],
+            "counts": {"match": 0, "conditional": 1, "exclude": 0},
+            "geography_audit": {"domestic_registry": 1}, "portal_delta": {},
+            "database_as_of": "2026-07-09", "database_metadata": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.html"
+            render_html(payload, output)
+            html = output.read_text(encoding="utf-8")
+        self.assertIn('data-access="domestic"', html)
+        self.assertIn("<b>1</b><span>国内可及</span>", html)
 
     def test_renderer_rejects_untrusted_language_and_active_url_schemes(self):
         patient = {"patient_id": "P1", "country": "China", "mutations": []}

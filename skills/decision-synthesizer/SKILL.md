@@ -162,26 +162,33 @@ Trigger GoC discussion if ANY of:
 
 If any trigger fires, emit `goals_of_care.triggered = true` with `reasons` and a `discussion_recommendation` paragraph.
 
-### Step 4 — Top-N decision paths (diversity bucketing)
+### Step 4 — Top-N decision paths (global patient-fit ranking)
 
-Select Top-N (default N=3) from the matched trials, prioritizing both quality and diversity:
+Select up to N paths (default N=3) by patient fit. Three is a maximum, not a quota:
 
 ```
 Step 4a — Filter
   - Drop verdict=exclude
   - Keep verdict=match and verdict=conditional
+  - Drop known biomarker/cohort mismatches and trials with failed blockers
+  - Drop inactive studies from the recommendation list
+  - Drop trials whose core study drug overlaps the patient's ongoing regimen;
+    they may remain in the audit trail as verification options
 
-Step 4b — Sort by composite score
-  composite = 0.5 * feasibility.composite + 0.3 * (1 - confidence_penalty) + 0.2 * evidence_tier_weight
-  where evidence_tier_weight: trial_specific=1.0, mutation_class=0.7, drug_class=0.5, no_data=0.2
+Step 4b — Rank lexicographically
+  1. exact disease, cohort and biomarker fit
+  2. match before conditional; fewer unresolved eligibility blockers
+  3. compatibility with the current treatment line and prior therapies
+  4. recruiting status and accessible patient-country sites
+  5. trial-specific evidence quality
+  6. operational feasibility
 
-Step 4c — Diversity bucketing (avoid 3 same-mechanism paths)
-  Allocate slots:
-  - 1 slot: highest composite score (the "primary path")
-  - 1 slot: best alternative mechanism (different drug class)
-  - 1 slot: best cell therapy OR best different-region path (overseas if patient willing)
-
-  If a slot has no qualifying candidate, leave the slot empty (don't fill with a worse-fit path just for diversity).
+Step 4c — Near-duplicate suppression
+  Select the globally highest-ranked candidates without reserving geographic or
+  mechanism slots. Skip a later candidate when it is an explicitly flagged
+  duplicate, uses the same core study agent, or has a nearly identical
+  intervention set to an already selected path. Do not suppress distinct
+  modalities merely because they share a disease or molecular target.
 
 Step 4d — Per-path narrative
   For each chosen path:

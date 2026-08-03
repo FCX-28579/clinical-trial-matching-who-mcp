@@ -198,6 +198,19 @@ class ModelApiRunnerTests(unittest.TestCase):
         self.assertNotIn("temperature", body)
         self.assertNotIn("response_format", body)
 
+    def test_stage_specific_token_parameter_is_model_agnostic(self) -> None:
+        with patch.dict(os.environ, {
+            "TRANSLATION_MODEL_TOKEN_PARAMETER": "max_tokens",
+            "TRANSLATION_MODEL_MAX_OUTPUT_TOKENS": "4096",
+        }, clear=True):
+            _, _, body = model_api_runner._request(
+                "minimax", "openai-chat", "https://api.minimaxi.com/v1",
+                "secret", "any-model-name", "prompt", stage="translation",
+            )
+        self.assertIn("max_tokens", body)
+        self.assertNotIn("max_completion_tokens", body)
+        self.assertEqual(body["max_tokens"], 4096)
+
     def test_post_retries_transient_http_error(self) -> None:
         response = MagicMock()
         response.__enter__.return_value.read.return_value = b'{"ok":true}'

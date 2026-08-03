@@ -255,11 +255,19 @@ def build_prompt(envelope: dict[str, Any]) -> str:
 
 
 def _request(
-    provider_name: str, protocol: str, base_url: str, key: str, model: str, prompt: str
+    provider_name: str, protocol: str, base_url: str, key: str, model: str, prompt: str,
+    *, stage: str = "",
 ) -> tuple[str, dict, dict]:
-    max_tokens = _env_int("MODEL_MAX_OUTPUT_TOKENS", 16_384)
-    temperature_raw = os.environ.get("MODEL_TEMPERATURE", "").strip()
-    temperature = _env_float("MODEL_TEMPERATURE", 0) if temperature_raw else None
+    max_tokens_raw = _stage_value(stage, "MODEL_MAX_OUTPUT_TOKENS") or "16384"
+    try:
+        max_tokens = int(max_tokens_raw)
+    except ValueError as exc:
+        raise ValueError("MODEL_MAX_OUTPUT_TOKENS must be an integer") from exc
+    temperature_raw = _stage_value(stage, "MODEL_TEMPERATURE")
+    try:
+        temperature = float(temperature_raw) if temperature_raw else None
+    except ValueError as exc:
+        raise ValueError("MODEL_TEMPERATURE must be numeric") from exc
     if protocol == "openai-responses":
         body = {"model": model, "input": prompt, "max_output_tokens": max_tokens, "store": False}
         if temperature is not None:
@@ -281,7 +289,7 @@ def _request(
             {"role": "user", "content": prompt},
         ],
     }
-    token_parameter = os.environ.get("MODEL_TOKEN_PARAMETER", "").strip()
+    token_parameter = _stage_value(stage, "MODEL_TOKEN_PARAMETER")
     if not token_parameter:
         token_parameter = "max_completion_tokens" if provider_name == "minimax" else "max_tokens"
     if token_parameter not in {"max_tokens", "max_completion_tokens"}:
@@ -289,7 +297,7 @@ def _request(
     body[token_parameter] = max_tokens
     if temperature is not None:
         body["temperature"] = temperature
-    if os.environ.get("MODEL_ENABLE_JSON_MODE") == "1":
+    if _stage_value(stage, "MODEL_ENABLE_JSON_MODE") == "1":
         body["response_format"] = {"type": "json_object"}
     return f"{base_url}/chat/completions", {"Authorization": f"Bearer {key}"}, body
 
@@ -392,7 +400,7 @@ def main() -> None:
     provider_name, provider, model, base_url, key = _configuration(stage)
     protocol = _stage_value(stage, "MODEL_API_PROTOCOL") or provider.protocol
     url, headers, body = _request(
-        provider_name, protocol, base_url, key, model, build_prompt(envelope)
+        provider_name, protocol, base_url, key, model, build_prompt(envelope), stage=stage
     )
     response = _post(url, headers, body)
     _assert_complete_response(protocol, response)

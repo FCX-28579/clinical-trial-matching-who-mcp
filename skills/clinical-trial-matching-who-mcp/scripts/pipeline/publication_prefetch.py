@@ -21,12 +21,14 @@ def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def _cache_name(trial_id: str) -> str:
+def _cache_name(trial_id: str, query: str = "") -> str:
     readable = "".join(
         character for character in trial_id
         if character.isalnum() or character in "-_"
     )[:60] or "trial"
-    digest = hashlib.sha256(trial_id.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha256(
+        f"publication-query-v2\n{trial_id}\n{query}".encode("utf-8")
+    ).hexdigest()[:10]
     return f"{readable}-{digest}.json"
 
 
@@ -38,11 +40,11 @@ def _query_for_trial(trial: dict[str, Any]) -> str:
         if str(value).strip()
     ][:3]
     disease = str(trial.get("disease_text") or "").strip()
-    terms = [f'"{trial_id}"'] if trial_id else []
-    terms.extend(f'"{value}"' for value in interventions)
-    if disease:
-        terms.append(f'"{disease}"')
-    return " OR ".join(terms)
+    exact = f'"{trial_id}"' if trial_id else ""
+    contextual = " OR ".join(f'"{value}"' for value in interventions)
+    if contextual and disease:
+        contextual = f'({contextual}) AND "{disease}"'
+    return " OR ".join(value for value in (exact, contextual) if value)
 
 
 def _search(trial: dict[str, Any]) -> dict[str, Any]:
@@ -117,9 +119,13 @@ def enrich_deep_jobs_file(jobs_path: Path, cache_dir: Path) -> dict[str, Any]:
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         for trial in trials:
             trial_id = str(trial.get("id") or "").strip()
-            cache = cache_dir / _cache_name(trial_id)
+            query = _query_for_trial(trial)
+            cache = cache_dir / _cache_name(trial_id, query)
             if cache.exists():
                 cached = load_json(cache)
+                if (cached.get("queries") or [""])[0] != query or cached.get("status") == "error":
+                    pending[pool.submit(_search, trial)] = (trial_id, cache)
+                    continue
                 if not cached.get("searched_at"):
                     cached["searched_at"] = dt.datetime.fromtimestamp(
                         cache.stat().st_mtime, tz=dt.timezone.utc

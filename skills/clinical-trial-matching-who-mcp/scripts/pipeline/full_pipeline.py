@@ -39,6 +39,7 @@ from patient_input import load_patient_input
 from generic_hard_rules import apply_generic_hard_rules
 from feasibility import WEIGHTS, compute_feasibility
 from html_renderer import render_html, render_validation_html
+from report_translation import maybe_translate_report
 from mcp_http_client import run_remote_who_workflow
 from mcp_stdio_client import run_who_workflow
 from mechanism_categories import CATEGORY_ORDER, classify_mechanism
@@ -469,8 +470,18 @@ def prepare(
     prefilter_limit: int = 0, analysis_limit: int = 0, batch_size: int = 5,
     portal_delta_path: Path | None = None,
     portal_delta_mode: str = "off", live_registry_verification: bool = False,
+    report_language_override: str | None = None,
+    patient_country_override: str | None = None,
 ) -> dict[str, Any]:
     patient, patient_input_audit = load_patient_input(patient_path)
+    if patient_country_override:
+        patient["country"] = str(patient_country_override).strip()
+        patient_input_audit["patient_country_override"] = patient["country"]
+    if report_language_override:
+        if report_language_override not in {"zh-CN", "en"}:
+            raise ValueError("report_language_override must be zh-CN or en")
+        patient["report_language"] = report_language_override
+        patient_input_audit["report_language_override"] = report_language_override
     plan = load_json(plan_path) if plan_path else build_baseline_search_plan(patient)
     errors = validate_search_plan(plan, require_full_coverage=True)
     errors.extend(validate_search_plan_for_patient(plan, patient))
@@ -559,6 +570,7 @@ def prepare(
             verified,
             workers=int(os.environ.get("LIVE_REGISTRY_CONCURRENCY", "8")),
             timeout=float(os.environ.get("LIVE_REGISTRY_TIMEOUT_SECONDS", "20")),
+            patient=patient,
         )
         verified = live["active_or_unknown"] + live["inactive"]
         live_inactive_ids = {
@@ -724,7 +736,23 @@ def finalize(*, prepared_path: Path, analysis_path: Path, out_dir: Path) -> dict
     counts = {key: counts.get(key, 0) for key in ("match", "conditional", "exclude")}
     geography = dict(Counter(trial["country_assessment"]["class"] for trial in trials))
     quality_gates = report_quality_gates(prepared, len(trials), coverage_audit)
-    formal_ready = all(quality_gates.values())
+    # Only analysis integrity blocks patient-card rendering. Retrieval
+    # completeness, freshness and language consistency remain prominent,
+    # auditable warnings because they are local limitations, not corrupt data.
+    formal_ready = quality_gates["complete_analysis"]
+    report_warnings: list[dict[str, str]] = []
+    if not quality_gates["complete_retrieval"]:
+        report_warnings.append({
+            "code": "RETRIEVAL_INCOMPLETE",
+            "message_zh": "检索结果可能因分页或数量上限而不完整；报告仅覆盖已召回并完成分析的试验。",
+            "message_en": "Retrieval may be incomplete due to pagination or result limits; the report covers recalled and analyzed trials only.",
+        })
+    if not quality_gates["current_data_snapshot"]:
+        report_warnings.append({
+            "code": "DATA_SNAPSHOT_STALE",
+            "message_zh": "数据快照未达到当前新鲜度目标；招募状态和中心信息须在联系研究中心前重新核实。",
+            "message_en": "The data snapshot does not meet the current freshness target; recruitment status and sites require re-verification before contact.",
+        })
     run_manifest = {
         "schema_version": "formal-run-manifest-v1",
         "prepared_sha256": _sha256(prepared_path),
@@ -742,6 +770,12 @@ def finalize(*, prepared_path: Path, analysis_path: Path, out_dir: Path) -> dict
         },
         "coverage_audit": coverage_audit,
         "quality_gates": quality_gates,
+        "gate_policy": {
+            "complete_analysis": "blocking",
+            "complete_retrieval": "warning",
+            "current_data_snapshot": "warning",
+        },
+        "warnings": report_warnings,
         "formal_report_ready": formal_ready,
     }
     payload = {
@@ -749,8 +783,13 @@ def finalize(*, prepared_path: Path, analysis_path: Path, out_dir: Path) -> dict
         "analysis_schema_version": analysis_bundle["schema_version"],
         "analysis_provenance": analysis_bundle["analysis_provenance"],
         "formal_report_ready": formal_ready,
-        "report_mode": "formal" if formal_ready else "validation",
+        "report_mode": (
+            "formal_with_warnings" if formal_ready and report_warnings
+            else "formal" if formal_ready else "validation"
+        ),
         "quality_gates": quality_gates,
+        "gate_policy": run_manifest["gate_policy"],
+        "report_warnings": report_warnings,
         "run_manifest": run_manifest,
         "stages": [
             "patient_structuring", "8-dimension_MCP_recall", "canonical_registry_deduplication",
@@ -780,6 +819,10 @@ def finalize(*, prepared_path: Path, analysis_path: Path, out_dir: Path) -> dict
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     out_dir.mkdir(parents=True, exist_ok=True)
+    if formal_ready:
+        payload = maybe_translate_report(
+            payload, cache_path=out_dir / "report-translations.json"
+        )
     write_json_atomic(out_dir / "pipeline.json", payload)
     (out_dir / "run-manifest.json").write_text(
         json.dumps(run_manifest, ensure_ascii=False, indent=2), encoding="utf-8"

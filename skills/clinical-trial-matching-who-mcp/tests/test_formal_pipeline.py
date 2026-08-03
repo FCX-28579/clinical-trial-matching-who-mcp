@@ -171,6 +171,45 @@ class FormalPipelineStateTests(unittest.TestCase):
             self.assertFalse(audit["complete"])
             self.assertEqual(audit["missing"], ["T2"])
 
+    def test_formal_complete_status_uses_the_real_deep_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            gater_dir = run_dir / "gater-batches"
+            deep_dir = run_dir / "deep-batches"
+            gater_dir.mkdir()
+            deep_dir.mkdir()
+            jobs = run_dir / "analysis_jobs.json"
+            deep_jobs = run_dir / "deep_jobs.json"
+            jobs.write_text(json.dumps({
+                "schema_version": "clinical-analysis-jobs-v2",
+                "batches": [{"trials": [{"id": "T1"}]}],
+            }), encoding="utf-8")
+            deep_jobs.write_text(json.dumps({
+                "batches": [{"trials": [{"id": "T1"}]}],
+            }), encoding="utf-8")
+            (gater_dir / "gater-batch-001.json").write_text(json.dumps({
+                "analyzed_trials": [{
+                    "trial_id": "T1", "gating": {"verdict": "conditional"},
+                }],
+            }), encoding="utf-8")
+            (deep_dir / "deep-batch-001.json").write_text(json.dumps({
+                "analyzed_trials": [{"trial_id": "T1"}],
+            }), encoding="utf-8")
+            formal._save_state(run_dir, {
+                "schema_version": "formal-pipeline-state-v1",
+                "stage": "formal_complete",
+                "gater_jobs_path": str(jobs),
+                "gater_batch_dir": str(gater_dir),
+                "deep_jobs_path": str(deep_jobs),
+                "deep_batch_dir": str(deep_dir),
+                "formal_report_ready": True,
+            })
+            result = formal.formal_status(run_dir)
+            self.assertTrue(result["deep_status"]["complete"])
+            self.assertTrue(result["batch_status"]["stages"]["deep"]["complete"])
+            self.assertTrue(result["batch_status"]["complete"])
+            self.assertTrue(result["complete"])
+
     def test_deep_jobs_requires_gater_stage_not_whole_workflow_completion(self):
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)

@@ -154,6 +154,42 @@ class ModelBatchRecoveryTests(unittest.TestCase):
             persisted = json.loads(output.read_text(encoding="utf-8"))
             self.assertIn("gating", persisted["analyzed_trials"][0])
 
+    def test_unambiguous_hard_line_conflict_cannot_remain_conditional(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "gater.json"
+            gating = {
+                **self._gating("conditional"),
+                "hard_rules_triggered": ["R2"],
+                "blockers_failed": ["Prior systemic therapy"],
+                "R2_detail": {"severity": "hard", "note": "First-line only"},
+            }
+            output.write_text(json.dumps({
+                "analyzed_trials": [{"trial_id": "NCT1", **gating}],
+            }), encoding="utf-8")
+            payload = _validate_batch_output({
+                "stage": "gater", "patient": {}, "trials": [{"id": "NCT1"}],
+            }, output)
+            self.assertEqual(payload["analyzed_trials"][0]["gating"]["verdict"], "exclude")
+
+    def test_cohort_specific_hard_conflict_preserves_alternative_cohort(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "gater.json"
+            gating = {
+                **self._gating("conditional"),
+                "hard_rules_triggered": ["R2"],
+                "R2_detail": {
+                    "severity": "hard",
+                    "cohort_analysis": "First-line cohort fails; previously treated basket cohort may qualify.",
+                },
+            }
+            output.write_text(json.dumps({
+                "analyzed_trials": [{"trial_id": "NCT1", **gating}],
+            }), encoding="utf-8")
+            payload = _validate_batch_output({
+                "stage": "gater", "patient": {}, "trials": [{"id": "NCT1"}],
+            }, output)
+            self.assertEqual(payload["analyzed_trials"][0]["gating"]["verdict"], "conditional")
+
     def test_existing_native_gater_output_resumes_without_calling_a_runner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -395,6 +431,47 @@ class ModelBatchRecoveryTests(unittest.TestCase):
                 len(payload["analyzed_trials"][0]["risk_annotation"]["risks"]), 1
             )
 
+    def test_missing_risk_applicability_reuses_existing_narrative(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "deep.json"
+            output.write_text(json.dumps({
+                "analyzed_trials": [{
+                    "trial_id": "NCT1",
+                    "risk_annotation": {
+                        "patient_cancer_context": "CRC",
+                        "risks": [{
+                            "key": "phase_1",
+                            "narrative": ["Early dose escalation creates uncertain benefit."],
+                        }],
+                    },
+                    "efficacy_context": {
+                        "efficacy_snapshot": {
+                            "match_type": "no_data",
+                            "applies_because": "No applicable data",
+                        },
+                        "vs_soc": {"available": False},
+                        "development_evidence": [],
+                        "evidence_search": {
+                            "status": "no_relevant_publication",
+                            "searched_at": "2026-07-29T00:00:00+00:00",
+                            "queries": ["NCT1"],
+                        },
+                    },
+                }],
+            }), encoding="utf-8")
+            payload = _validate_batch_output({
+                "stage": "deep",
+                "patient": {"cancer_type": "CRC"},
+                "trials": [{
+                    "id": "NCT1", "gating": self._gating("conditional"),
+                }],
+            }, output)
+            risk = payload["analyzed_trials"][0]["risk_annotation"]["risks"][0]
+            self.assertEqual(
+                risk["applies_because"],
+                "Early dose escalation creates uncertain benefit.",
+            )
+
     def test_evidence_urls_are_structurally_valid_or_removed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "deep.json"
@@ -564,6 +641,54 @@ class ModelBatchRecoveryTests(unittest.TestCase):
                 },
             }), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "not a non-excluded candidate"):
+                _validate_decision_output(output, {"NCT1"})
+
+    def test_decision_paths_are_top_three_and_persist_grounded_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "decision.json"
+            output.write_text(json.dumps({
+                "decision_report": {
+                    "decision_paths": [
+                        {"trial_id": f"NCT{i}", "rationale": "资格待核实路径"}
+                        for i in range(1, 6)
+                    ],
+                    "goals_of_care": {},
+                },
+            }), encoding="utf-8")
+            analyzed = [{
+                "trial_id": f"NCT{i}",
+                "title": f"Trial {i}",
+                "gating": {
+                    "verdict": "conditional",
+                    "rationale": f"Patient-specific reason {i}",
+                    "blockers_pending": ["screening"],
+                },
+                "risk_summary": {"risks": []},
+                "efficacy_summary": {"applies_because": "same cancer"},
+            } for i in range(1, 6)]
+            payload = _validate_decision_output(
+                output, {f"NCT{i}" for i in range(1, 6)}, analyzed, "zh-CN"
+            )
+            paths = payload["decision_report"]["decision_paths"]
+            self.assertEqual(len(paths), 3)
+            self.assertEqual(paths[0]["trial_title"], "Trial 1")
+            self.assertIn("Patient-specific reason 1", paths[0]["rationale"])
+            persisted = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["decision_report"]["decision_paths"], paths)
+
+    def test_decision_rejects_claimed_paths_when_all_slots_are_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "decision.json"
+            output.write_text(json.dumps({
+                "decision_report": {
+                    "decision_paths": [
+                        {"rank": 1, "trial_id": None, "rationale": "empty slot"},
+                    ],
+                    "goals_of_care": {},
+                    "v2_summary": {"decision_paths_emitted": 1},
+                },
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "none referenced a valid"):
                 _validate_decision_output(output, {"NCT1"})
 
     def test_duplicate_batch_suffix_is_rejected_before_model_calls(self) -> None:

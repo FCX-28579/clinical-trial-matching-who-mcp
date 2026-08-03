@@ -124,6 +124,7 @@ def _compact_decision_trial(
         "trial_id": analysis.get("trial_id"),
         "title": source.get("title") or source.get("scientific_title") or "",
         "phase": source.get("phases") or [],
+        "overall_status": source.get("overall_status") or "",
         "sponsor": source.get("sponsor") or "",
         "interventions": (source.get("interventions") or [])[:6],
         "mechanism_category": {
@@ -281,6 +282,8 @@ def prepare_formal(args: argparse.Namespace) -> dict[str, Any]:
         portal_delta_path=Path(args.portal_delta) if args.portal_delta else None,
         portal_delta_mode=portal_mode,
         live_registry_verification=live_verification,
+        report_language_override=getattr(args, "report_language", None),
+        patient_country_override=getattr(args, "patient_country", None),
     )
     state = {
         "schema_version": "formal-pipeline-state-v1",
@@ -327,15 +330,28 @@ def formal_status(run_dir: Path) -> dict[str, Any]:
             if not gater_complete
             else "Run deep-jobs."
         )
-    elif state["stage"] == "deep_pending":
+    elif state["stage"] in {"deep_pending", "formal_complete", "validation_failed"}:
         deep_status = _deep_status(
             Path(state["deep_jobs_path"]), Path(state["deep_batch_dir"])
         )
+        if isinstance(batch_status.get("stages"), dict):
+            batch_status["stages"]["deep"] = deep_status
+            batch_status["complete"] = bool(
+                batch_status["stages"].get("gater", {}).get("complete")
+                and deep_status["complete"]
+            )
         result["deep_status"] = deep_status
-        result["next_action"] = (
-            "Complete all deep batches, then run merge."
-            if not deep_status["complete"]
-            else "Run merge with the decision-synthesizer output."
+        if state["stage"] == "deep_pending":
+            result["next_action"] = (
+                "Complete all deep batches, then run merge."
+                if not deep_status["complete"]
+                else "Run merge with the decision-synthesizer output."
+            )
+        result["complete"] = bool(
+            state["stage"] == "formal_complete"
+            and batch_status.get("stages", {}).get("gater", {}).get("complete")
+            and deep_status["complete"]
+            and state.get("formal_report_ready")
         )
     return result
 
@@ -514,6 +530,14 @@ def main() -> None:
     )
     prepare_parser.add_argument("--run-dir", required=True)
     prepare_parser.add_argument(
+        "--report-language", choices=("zh-CN", "en"),
+        help="Override the patient file's report language for this run.",
+    )
+    prepare_parser.add_argument(
+        "--patient-country",
+        help="Explicitly override the patient's current country for access scoring.",
+    )
+    prepare_parser.add_argument(
         "--mcp-transport",
         choices=("stdio", "streamable-http"),
         default=os.environ.get("WHO_MCP_TRANSPORT", "stdio"),
@@ -585,9 +609,6 @@ def main() -> None:
         result = create_formal_deep_jobs(run_dir)
     elif args.command == "merge":
         patient = load_json(Path(_load_state(run_dir)["patient_path"]))
-        expected_language = report_language(patient)
-        if args.output_language != expected_language:
-            raise ValueError(f"output-language must be {expected_language}")
         result = merge_formal(
             run_dir, Path(args.decision), args.model, args.output_language
         )
